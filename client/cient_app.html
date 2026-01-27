@@ -2,22 +2,121 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>WS Audio Client</title>
+  <title>Voice WS Client</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 20px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; min-width: 280px; }
+    .k { color: #666; font-size: 12px; }
+    .v { font-weight: 600; }
+    #level { width: 100%; height: 10px; }
+    #log { white-space: pre-wrap; background: #0b1020; color: #e6edf3; padding: 12px; border-radius: 10px; max-height: 280px; overflow: auto; }
+    #transcripts { white-space: pre-wrap; background: #f7f7f7; padding: 12px; border-radius: 10px; max-height: 220px; overflow: auto; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: white; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    select,input { padding: 8px; border-radius: 8px; border: 1px solid #ccc; }
+  </style>
 </head>
 <body>
-  <h3>Audio WS Client</h3>
-  <button id="btnStart">Start</button>
-  <button id="btnStop" disabled>Stop</button>
-  <pre id="log"></pre>
+  <h2>Audio WS Client</h2>
+
+  <div class="row">
+    <div class="card">
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <button id="btnConnect">Connect</button>
+        <button id="btnStart" disabled>Start</button>
+        <button id="btnStop" disabled>Stop</button>
+      </div>
+
+      <div style="margin-top:12px;">
+        <div class="k">Server WS URL</div>
+        <input id="wsUrl" style="width:100%;" value="ws://IP_SERVIDOR:8000/ws/audio" />
+      </div>
+
+      <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
+        <div>
+          <div class="k">Model</div>
+          <select id="model">
+            <option value="tiny">tiny</option>
+            <option value="base" selected>base</option>
+            <option value="small">small</option>
+            <option value="medium">medium</option>
+          </select>
+        </div>
+        <div>
+          <div class="k">Language</div>
+          <select id="language">
+            <option value="Spanish" selected>Spanish</option>
+            <option value="English">English</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <div class="k">Input Level (RMS approx)</div>
+        <progress id="level" value="0" max="1"></progress>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="k">Connection</div>
+      <div class="v" id="connState">DISCONNECTED</div>
+
+      <hr />
+
+      <div class="k">AudioContext sampleRate</div>
+      <div class="v" id="ctxSr">-</div>
+
+      <div class="k">Server SR</div>
+      <div class="v" id="srvSr">-</div>
+
+      <div class="k">Frames sent</div>
+      <div class="v" id="framesSent">0</div>
+
+      <div class="k">Bytes buffered (server)</div>
+      <div class="v" id="bufBytes">0</div>
+
+      <div class="k">Seconds buffered (server)</div>
+      <div class="v" id="bufSec">0</div>
+
+      <div class="k">Recording timer</div>
+      <div class="v" id="recTimer">0.0s</div>
+
+      <div class="k">Last STT latency</div>
+      <div class="v" id="sttLatency">-</div>
+    </div>
+  </div>
+
+  <h3>Transcripts</h3>
+  <div id="transcripts"></div>
+
+  <h3>Log</h3>
+  <div id="log"></div>
 
 <script>
-const logEl = document.getElementById("log");
-function log(msg){ logEl.textContent += msg + "\n"; }
+const el = (id) => document.getElementById(id);
+const logEl = el("log");
+const trEl = el("transcripts");
+
+function log(msg){
+  const ts = new Date().toISOString().slice(11,19);
+  logEl.textContent += `[${ts}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function addTranscript(text, meta){
+  const ts = new Date().toISOString().slice(11,19);
+  const m = meta ? `  (lat=${meta.latency_sec}s model=${meta.model} lang=${meta.language})` : "";
+  trEl.textContent += `${ts} > ${text}${m}\n`;
+  trEl.scrollTop = trEl.scrollHeight;
+}
 
 let ws, audioCtx, processor, source, stream;
 let isRunning = false;
+let framesSent = 0;
+let recStart = 0;
+let timerHandle = null;
 
-// Convierte Float32 [-1..1] a PCM16 little-endian
 function floatTo16BitPCM(float32Array) {
   const buffer = new ArrayBuffer(float32Array.length * 2);
   const view = new DataView(buffer);
@@ -29,7 +128,6 @@ function floatTo16BitPCM(float32Array) {
   return buffer;
 }
 
-// Downsample a 16kHz (simple, suficiente para MVP)
 function downsampleBuffer(buffer, sampleRate, outRate) {
   if (outRate === sampleRate) return buffer;
   const ratio = sampleRate / outRate;
@@ -37,77 +135,163 @@ function downsampleBuffer(buffer, sampleRate, outRate) {
   const result = new Float32Array(newLen);
   let offsetResult = 0;
   let offsetBuffer = 0;
+
   while (offsetResult < result.length) {
     const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
-    // promedio
     let accum = 0, count = 0;
     for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
       accum += buffer[i]; count++;
     }
-    result[offsetResult] = accum / count;
+    result[offsetResult] = accum / (count || 1);
     offsetResult++;
     offsetBuffer = nextOffsetBuffer;
   }
   return result;
 }
 
-async function start() {
-  const SERVER_WS = "ws://IP_SERVIDOR:8000/ws/audio"; // <- cambia IP o Tailscale IP
+function updateTimer(){
+  const t = (performance.now() - recStart) / 1000;
+  el("recTimer").textContent = t.toFixed(1) + "s";
+}
+
+async function connectWS(){
+  const SERVER_WS = el("wsUrl").value.trim();
 
   ws = new WebSocket(SERVER_WS);
   ws.binaryType = "arraybuffer";
 
-  ws.onopen = () => log("WS connected");
+  el("connState").textContent = "CONNECTING...";
+  log("WS connecting to " + SERVER_WS);
+
+  ws.onopen = () => {
+    el("connState").textContent = "CONNECTED";
+    log("WS connected");
+
+    el("btnStart").disabled = false;
+
+    // enviar config
+    ws.send(JSON.stringify({
+      type: "config",
+      model: el("model").value,
+      language: el("language").value
+    }));
+  };
+
   ws.onmessage = (ev) => {
-    try {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === "ready") log(`Server ready sr=${msg.sr}`);
-      if (msg.type === "transcript") log("TRANSCRIPT: " + msg.text);
-      if (msg.type === "error") log("ERROR: " + msg.message);
-    } catch {
-      log("MSG: " + ev.data);
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { log("MSG: " + ev.data); return; }
+
+    if (msg.type === "ready") {
+      el("srvSr").textContent = msg.sr;
+      log(`Server ready sr=${msg.sr} max_seconds=${msg.max_seconds}`);
+    }
+    if (msg.type === "config_ack") {
+      log(`Config ACK model=${msg.model} lang=${msg.language}`);
+    }
+    if (msg.type === "stats") {
+      el("bufBytes").textContent = msg.bytes;
+      el("bufSec").textContent = msg.seconds;
+      el("level").value = msg.rms || 0;
+    }
+    if (msg.type === "state") {
+      log(`State: ${msg.value} (seconds=${msg.seconds ?? "-"})`);
+    }
+    if (msg.type === "transcript") {
+      addTranscript(msg.text || "", msg.meta || null);
+      if (msg.meta && msg.meta.latency_sec != null) {
+        el("sttLatency").textContent = msg.meta.latency_sec + "s";
+      }
+      if (msg.meta && msg.meta.whisper_dbg) {
+        log("Whisper dbg: " + msg.meta.whisper_dbg);
+      }
+    }
+    if (msg.type === "error") {
+      log("ERROR: " + msg.message);
     }
   };
-  ws.onclose = () => log("WS closed");
+
+  ws.onclose = () => {
+    el("connState").textContent = "DISCONNECTED";
+    log("WS closed");
+    el("btnStart").disabled = true;
+    el("btnStop").disabled = true;
+  };
+}
+
+async function startRec(){
+  if (!ws || ws.readyState !== 1) {
+    log("WS not ready");
+    return;
+  }
 
   stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  source = audioCtx.createMediaStreamSource(stream);
 
-  // ScriptProcessor está deprecado pero sirve para MVP; para producción usa AudioWorklet
+  await audioCtx.resume(); // importante: desbloquea audio en varios navegadores
+
+  el("ctxSr").textContent = audioCtx.sampleRate;
+
+  source = audioCtx.createMediaStreamSource(stream);
   processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+  framesSent = 0;
+  el("framesSent").textContent = "0";
 
   processor.onaudioprocess = (e) => {
     if (!isRunning || ws.readyState !== 1) return;
+
     const input = e.inputBuffer.getChannelData(0);
     const down = downsampleBuffer(input, audioCtx.sampleRate, 16000);
     const pcm = floatTo16BitPCM(down);
+
     ws.send(pcm);
+
+    framesSent++;
+    if (framesSent % 10 === 0) el("framesSent").textContent = String(framesSent);
   };
 
   source.connect(processor);
   processor.connect(audioCtx.destination);
 
   isRunning = true;
-  document.getElementById("btnStart").disabled = true;
-  document.getElementById("btnStop").disabled = false;
+  recStart = performance.now();
+  timerHandle = setInterval(updateTimer, 200);
+
+  el("btnStart").disabled = true;
+  el("btnStop").disabled = false;
   log("Recording...");
 }
 
-async function stop() {
+async function stopRec(){
   isRunning = false;
 
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: "stop", model: "base" }));
+  if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+  el("btnStart").disabled = false;
+  el("btnStop").disabled = true;
+
+  try {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "stop" }));
+      log("Stopped (sent stop).");
+    }
+  } catch (e) {
+    log("Stop send failed: " + e);
   }
 
-  document.getElementById("btnStart").disabled = false;
-  document.getElementById("btnStop").disabled = true;
-  log("Stopped (sent stop).");
+  // limpiar audio local
+  try { if (processor) processor.disconnect(); } catch {}
+  try { if (source) source.disconnect(); } catch {}
+  try { if (stream) stream.getTracks().forEach(t => t.stop()); } catch {}
+  try { if (audioCtx) await audioCtx.close(); } catch {}
+
+  processor = null; source = null; stream = null; audioCtx = null;
+
+  el("recTimer").textContent = "0.0s";
 }
 
-document.getElementById("btnStart").onclick = start;
-document.getElementById("btnStop").onclick = stop;
+el("btnConnect").onclick = connectWS;
+el("btnStart").onclick = startRec;
+el("btnStop").onclick = stopRec;
 </script>
 </body>
 </html>
