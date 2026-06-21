@@ -25,6 +25,9 @@ IDLE_TIMEOUT_SEC = 60
 DEFAULT_MODEL = "base"
 DEFAULT_LANG = "Spanish"
 
+ALLOWED_MODELS = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
+ALLOWED_LANGUAGES = {"Spanish", "English", "French", "German", "Italian", "Portuguese", "Japanese", "Chinese", "Russian", "Arabic"}
+
 
 def pcm16_bytes_to_wav(pcm_bytes: bytes, wav_path: str, sample_rate: int = 16000):
     """Escribe PCM16 mono a WAV."""
@@ -182,9 +185,16 @@ async def ws_audio(websocket: WebSocket):
                 data = json.loads(msg["text"])
 
                 if data.get("type") == "config":
-                    # Permite setear model/language desde el cliente
-                    current_cfg["model"] = data.get("model", current_cfg["model"])
-                    current_cfg["language"] = data.get("language", current_cfg["language"])
+                    model = data.get("model", current_cfg["model"])
+                    language = data.get("language", current_cfg["language"])
+                    if model not in ALLOWED_MODELS:
+                        await send({"type": "error", "message": f"model '{model}' not allowed. Must be one of: {sorted(ALLOWED_MODELS)}"})
+                        continue
+                    if language not in ALLOWED_LANGUAGES:
+                        await send({"type": "error", "message": f"language '{language}' not allowed. Must be one of: {sorted(ALLOWED_LANGUAGES)}"})
+                        continue
+                    current_cfg["model"] = model
+                    current_cfg["language"] = language
                     await send({"type": "config_ack", **current_cfg})
                     continue
 
