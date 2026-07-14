@@ -224,7 +224,13 @@ async function startRec(){
     return;
   }
 
-  stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    log("Error accessing microphone: " + err.message);
+    alert("No se pudo acceder al micrófono: " + err.message + "\nVerifica los permisos del navegador.");
+    return;
+  }
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
   await audioCtx.resume(); // importante: desbloquea audio en varios navegadores

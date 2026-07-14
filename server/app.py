@@ -8,7 +8,11 @@ from dataclasses import dataclass
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-app = FastAPI()
+app = FastAPI(title="Voice Web - Speech-to-Text")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server.app:app", host="0.0.0.0", port=8000, reload=False)
 
 # ===== CONFIG =====
 SAMPLE_RATE = 16000
@@ -182,7 +186,11 @@ async def ws_audio(websocket: WebSocket):
                     })
 
             elif "text" in msg and msg["text"] is not None:
-                data = json.loads(msg["text"])
+                try:
+                    data = json.loads(msg["text"])
+                except (json.JSONDecodeError, TypeError) as e:
+                    await send({"type": "error", "message": f"invalid JSON: {e}"})
+                    continue
 
                 if data.get("type") == "config":
                     model = data.get("model", current_cfg["model"])

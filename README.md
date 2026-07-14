@@ -46,7 +46,7 @@ voice-web/
 ├── server/
 │   └── app.py              # FastAPI WebSocket server con Whisper STT
 ├── client/
-│   └── cient_app.html      # Cliente web de captura de audio
+│   └── client_app.html      # Cliente web de captura de audio
 ├── tests/
 │   └── test_smoke.py       # Tests de humo
 ├── pyproject.toml           # Configuración del proyecto
@@ -86,7 +86,7 @@ El servidor se inicia en `http://0.0.0.0:8000` y expone el WebSocket en `ws://<I
 
 ### Cliente web
 
-Abre `client/cient_app.html` en un navegador:
+Abre `client/client_app.html` en un navegador:
 
 1. Cambia la URL del WebSocket a `ws://IP_SERVIDOR:8000/ws/audio`
 2. Haz clic en **Connect**
