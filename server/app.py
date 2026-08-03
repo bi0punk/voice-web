@@ -1,40 +1,55 @@
 import asyncio
 import json
+import logging
 import os
 import tempfile
 import time
 import wave
 from dataclasses import dataclass
 
+import numpy as np
+import whisper
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="Voice Web - Speech-to-Text")
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server.app:app", host="0.0.0.0", port=8000, reload=False)
+HOST = os.environ.get("VOICE_HOST", "0.0.0.0")
+PORT = int(os.environ.get("VOICE_PORT", "8000"))
+API_KEY = os.environ.get("VOICE_API_KEY", "")
 
-# ===== CONFIG =====
-SAMPLE_RATE = 16000
-SAMPLE_WIDTH_BYTES = 2  # int16
+SAMPLE_RATE = int(os.environ.get("VOICE_SAMPLE_RATE", "16000"))
+SAMPLE_WIDTH_BYTES = 2
 CHANNELS = 1
-
-# Máximo buffer por “frase” (en segundos) para evitar OOM si el cliente se queda enviando
-MAX_SECONDS_PER_UTTERANCE = 30
+MAX_SECONDS_PER_UTTERANCE = int(os.environ.get("VOICE_MAX_UTTERANCE_SEC", "30"))
 MAX_BUF_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH_BYTES * MAX_SECONDS_PER_UTTERANCE)
+IDLE_TIMEOUT_SEC = int(os.environ.get("VOICE_IDLE_TIMEOUT", "60"))
 
-# Timeout de inactividad (si no llega nada, cerramos)
-IDLE_TIMEOUT_SEC = 60
-
-DEFAULT_MODEL = "base"
-DEFAULT_LANG = "Spanish"
+DEFAULT_MODEL = os.environ.get("VOICE_DEFAULT_MODEL", "base")
+DEFAULT_LANG = os.environ.get("VOICE_DEFAULT_LANG", "Spanish")
 
 ALLOWED_MODELS = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
-ALLOWED_LANGUAGES = {"Spanish", "English", "French", "German", "Italian", "Portuguese", "Japanese", "Chinese", "Russian", "Arabic"}
+ALLOWED_LANGUAGES = {
+    "Spanish", "English", "French", "German", "Italian",
+    "Portuguese", "Japanese", "Chinese", "Russian", "Arabic",
+}
+
+model_cache: dict[str, whisper.Whisper] = {}
 
 
-def pcm16_bytes_to_wav(pcm_bytes: bytes, wav_path: str, sample_rate: int = 16000):
-    """Escribe PCM16 mono a WAV."""
+def get_model(name: str) -> whisper.Whisper:
+    if name not in model_cache:
+        log.info("Loading whisper model: %s", name)
+        model_cache[name] = whisper.load_model(name)
+    return model_cache[name]
+
+
+def pcm16_bytes_to_wav(pcm_bytes, wav_path: str, sample_rate: int = 16000):
     with wave.open(wav_path, "wb") as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(SAMPLE_WIDTH_BYTES)
@@ -43,65 +58,23 @@ def pcm16_bytes_to_wav(pcm_bytes: bytes, wav_path: str, sample_rate: int = 16000
 
 
 def pcm16_rms(pcm_bytes: bytes) -> float:
-    """RMS (nivel) estimado para telemetría."""
     if not pcm_bytes:
         return 0.0
-    import numpy as np
-
     a = np.frombuffer(pcm_bytes, dtype=np.int16)
     if a.size == 0:
         return 0.0
-    return float((np.sqrt(np.mean(a.astype(np.float32) ** 2)) / 32768.0))
+    return float(np.sqrt(np.mean(a.astype(np.float32) ** 2)) / 32768.0)
 
 
-async def run_whisper_cli(wav_path: str, model: str = DEFAULT_MODEL, language: str = DEFAULT_LANG) -> tuple[str, str]:
-    """
-    Ejecuta whisper CLI y devuelve (transcript, debug_stderr).
-    """
-    cmd = [
-        "whisper",
+def transcribe(wav_path: str, model_name: str, language: str) -> str:
+    m = get_model(model_name)
+    result = m.transcribe(
         wav_path,
-        "--model",
-        model,
-        "--language",
-        language,
-        "--task",
-        "transcribe",
-        "--fp16",
-        "False",
-        "--output_format",
-        "txt",
-        "--output_dir",
-        os.path.dirname(wav_path),
-        "--verbose",
-        "False",
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        language=language.lower(),
+        task="transcribe",
+        fp16=False,
     )
-    stdout, stderr = await proc.communicate()
-
-    stderr_s = (stderr or b"").decode(errors="ignore")
-    stdout_s = (stdout or b"").decode(errors="ignore")
-
-    txt_path = os.path.splitext(wav_path)[0] + ".txt"
-    if proc.returncode != 0:
-        # include parte de stderr y stdout para debug
-        raise RuntimeError(
-            "Whisper CLI failed. "
-            f"rc={proc.returncode} "
-            f"stderr={stderr_s[:2000]} "
-            f"stdout={stdout_s[:2000]}"
-        )
-
-    if not os.path.exists(txt_path):
-        return "", stderr_s[:2000]
-
-    with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read().strip()
-
-    return text, stderr_s[:2000]
+    return result["text"].strip()
 
 
 @dataclass
@@ -121,6 +94,12 @@ class Stats:
 
 @app.websocket("/ws/audio")
 async def ws_audio(websocket: WebSocket):
+    if API_KEY:
+        token = websocket.query_params.get("token", "")
+        if token != API_KEY:
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
+
     await websocket.accept()
 
     buf = bytearray()
@@ -130,7 +109,6 @@ async def ws_audio(websocket: WebSocket):
     async def send(event: dict):
         await websocket.send_text(json.dumps(event, ensure_ascii=False))
 
-    # handshake
     await send({
         "type": "ready",
         "sr": SAMPLE_RATE,
@@ -141,7 +119,6 @@ async def ws_audio(websocket: WebSocket):
         "default_language": DEFAULT_LANG,
     })
 
-    # watchdog idle timeout
     async def idle_watchdog():
         while True:
             await asyncio.sleep(2)
@@ -165,23 +142,21 @@ async def ws_audio(websocket: WebSocket):
                 stats.bytes_in += len(chunk)
                 stats.frames_in += 1
 
-                # hard limit
                 if len(buf) > MAX_BUF_BYTES:
                     await send({
                         "type": "error",
-                        "message": f"buffer exceeded max ({MAX_BUF_BYTES} bytes). clearing buffer."
+                        "message": f"buffer exceeded max ({MAX_BUF_BYTES} bytes). clearing buffer.",
                     })
                     buf.clear()
                     stats.reset_utterance()
                     continue
 
-                # cada ~1s manda stats
                 if stats.frames_in % 10 == 0:
                     await send({
                         "type": "stats",
                         "bytes": len(buf),
                         "seconds": round(len(buf) / (SAMPLE_RATE * SAMPLE_WIDTH_BYTES), 2),
-                        "rms": round(pcm16_rms(bytes(buf[-SAMPLE_RATE * SAMPLE_WIDTH_BYTES:])) , 4),  # RMS último 1s
+                        "rms": round(pcm16_rms(bytes(buf[-SAMPLE_RATE * SAMPLE_WIDTH_BYTES:])), 4),
                         "frames": stats.frames_in,
                     })
 
@@ -207,7 +182,6 @@ async def ws_audio(websocket: WebSocket):
                     continue
 
                 if data.get("type") == "stop":
-                    # “cierra frase” y transcribe
                     audio_seconds = len(buf) / (SAMPLE_RATE * SAMPLE_WIDTH_BYTES)
                     if audio_seconds < 0.2:
                         await send({"type": "transcript", "text": "", "meta": {"reason": "too_short", "seconds": audio_seconds}})
@@ -222,15 +196,12 @@ async def ws_audio(websocket: WebSocket):
                         wav_path = os.path.join(td, "chunk.wav")
                         pcm16_bytes_to_wav(bytes(buf), wav_path, SAMPLE_RATE)
 
-                        # limpiar antes de procesar (evita doble audio si el cliente sigue enviando)
                         buf.clear()
                         stats.reset_utterance()
 
                         try:
-                            text, whisper_dbg = await run_whisper_cli(
-                                wav_path,
-                                model=current_cfg["model"],
-                                language=current_cfg["language"],
+                            text = await asyncio.to_thread(
+                                transcribe, wav_path, current_cfg["model"], current_cfg["language"]
                             )
                             dt = time.time() - t0
                             await send({
@@ -240,10 +211,10 @@ async def ws_audio(websocket: WebSocket):
                                     "latency_sec": round(dt, 2),
                                     "model": current_cfg["model"],
                                     "language": current_cfg["language"],
-                                    "whisper_dbg": whisper_dbg[:500],  # recortado
                                 },
                             })
                         except Exception as e:
+                            log.exception("Transcription error")
                             await send({"type": "error", "message": str(e)})
 
                     await send({"type": "state", "value": "ready"})
@@ -252,6 +223,11 @@ async def ws_audio(websocket: WebSocket):
                     await send({"type": "pong", "ts": time.time()})
 
     except WebSocketDisconnect:
-        return
+        pass
     finally:
         wd_task.cancel()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server.app:app", host=HOST, port=PORT, reload=False)
