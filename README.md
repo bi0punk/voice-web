@@ -1,22 +1,22 @@
-# Voice Web
+# voice-web
 
 Servicio web que recibe audio por WebSocket, lo transcribe usando OpenAI Whisper (librería nativa) y envía el texto resultante. Modelo pre-cargado al iniciar para baja latencia.
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://python.org)
+[![CI](https://github.com/bi0punk/voice-web/actions/workflows/ci.yml/badge.svg)](https://github.com/bi0punk/voice-web/actions/workflows/ci.yml)
 
-## Tabla de Contenidos
+## Contenido
 
 - [Características](#características)
+- [Arquitectura](#arquitectura)
 - [Stack](#stack)
-- [Estructura](#estructura)
-- [Requisitos](#requisitos)
+- [Estructura del repositorio](#estructura-del-repositorio)
 - [Instalación](#instalación)
 - [Uso](#uso)
-- [Tests](#tests)
 - [Configuración](#configuración)
-- [CI](#ci)
-- [Limitaciones / Roadmap](#limitaciones--roadmap)
+- [Tests / CI](#tests--ci)
+- [Roadmap](#roadmap)
 - [Licencia](#licencia)
 
 ## Características
@@ -31,6 +31,31 @@ Servicio web que recibe audio por WebSocket, lo transcribe usando OpenAI Whisper
 - Timeout de inactividad configurable
 - Autenticación opcional por token en WebSocket
 
+## Arquitectura
+
+```mermaid
+sequenceDiagram
+  participant C as Cliente Web (client_app.html)
+  participant W as WebSocket /ws/audio
+  participant A as server/app.py (FastAPI)
+  participant M as whisper (modelo en caché)
+
+  C->>W: conectar (?token si API_KEY)
+  W->>A: accept + {"type":"ready"}
+  C->>W: {"type":"config", model, language}
+  W->>A: config_ack (validación model/lang)
+  loop Captura de audio
+    C->>W: chunks PCM16 16kHz (binario)
+    W->>A: buffering + stats (bytes/seconds/rms)
+  end
+  C->>W: {"type":"stop"}
+  W->>A: write WAV temporal
+  A->>M: transcribe (asyncio.to_thread)
+  M-->>A: texto
+  A-->>C: {"type":"transcript", text, meta}
+  W-->>A: idle_timeout -> cierre
+```
+
 ## Stack
 
 - **Python 3.11+**
@@ -41,7 +66,7 @@ Servicio web que recibe audio por WebSocket, lo transcribe usando OpenAI Whisper
 - **numpy** — procesamiento de audio
 - Linting: Ruff | Tests: pytest
 
-## Estructura
+## Estructura del repositorio
 
 ```
 voice-web/
@@ -61,12 +86,6 @@ voice-web/
 └── README.md
 ```
 
-## Requisitos
-
-- Python >= 3.11
-- GPU NVIDIA recomendada (CUDA) para Whisper, aunque funciona en CPU
-- Navegador moderno con soporte MediaDevices API (para el cliente web)
-
 ## Instalación
 
 ```bash
@@ -74,6 +93,8 @@ git clone https://github.com/bi0punk/voice-web.git
 cd voice-web
 pip install -r requirements.txt
 ```
+
+Requisitos: Python >= 3.11, GPU NVIDIA recomendada (CUDA) para Whisper (aunque funciona en CPU) y un navegador moderno con soporte MediaDevices API para el cliente web.
 
 ## Uso
 
@@ -117,13 +138,6 @@ Abre `client/client_app.html` en un navegador:
 - `{"type": "stats", "bytes": ..., "seconds": ..., "rms": ...}`
 - `{"type": "transcript", "text": "...", "meta": {"latency_sec": ..., "model": "..."}}`
 
-## Tests
-
-```bash
-pip install pytest
-python -m pytest tests/ -v
-```
-
 ## Configuración
 
 Variables de entorno (ver `.env.example`):
@@ -143,15 +157,25 @@ Modelos permitidos: `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `lar
 
 Idiomas permitidos: `Spanish`, `English`, `French`, `German`, `Italian`, `Portuguese`, `Japanese`, `Chinese`, `Russian`, `Arabic`
 
-## CI
+## Tests / CI
+
+```bash
+pip install pytest
+python -m pytest tests/ -v
+```
 
 GitHub Actions ejecuta Ruff linting y pytest en cada push y pull request.
 
-## Limitaciones / Roadmap
+## Roadmap
 
-- No implementa envío del texto transcrito a una máquina remota
-- Sin reconexión automática del cliente
-- Futuro: endpoint para enviar texto a máquina remota, autenticación JWT, streaming continuo sin stop, cola de transcripción, VAD (Voice Activity Detection)
+- [x] Transcripción por WebSocket con Whisper nativo
+- [x] Cliente web con captura de micrófono y downsampling
+- [ ] Envío del texto transcrito a una máquina remota
+- [ ] Reconexión automática del cliente
+- [ ] Autenticación JWT
+- [ ] Streaming continuo sin stop
+- [ ] Cola de transcripción
+- [ ] VAD (Voice Activity Detection)
 
 ## Licencia
 
