@@ -35,8 +35,16 @@ DEFAULT_LANG = os.environ.get("VOICE_DEFAULT_LANG", "Spanish")
 
 ALLOWED_MODELS = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
 ALLOWED_LANGUAGES = {
-    "Spanish", "English", "French", "German", "Italian",
-    "Portuguese", "Japanese", "Chinese", "Russian", "Arabic",
+    "Spanish",
+    "English",
+    "French",
+    "German",
+    "Italian",
+    "Portuguese",
+    "Japanese",
+    "Chinese",
+    "Russian",
+    "Arabic",
 }
 
 model_cache: dict[str, whisper.Whisper] = {}
@@ -109,22 +117,29 @@ async def ws_audio(websocket: WebSocket):
     async def send(event: dict):
         await websocket.send_text(json.dumps(event, ensure_ascii=False))
 
-    await send({
-        "type": "ready",
-        "sr": SAMPLE_RATE,
-        "width_bytes": SAMPLE_WIDTH_BYTES,
-        "channels": CHANNELS,
-        "max_seconds": MAX_SECONDS_PER_UTTERANCE,
-        "default_model": DEFAULT_MODEL,
-        "default_language": DEFAULT_LANG,
-    })
+    await send(
+        {
+            "type": "ready",
+            "sr": SAMPLE_RATE,
+            "width_bytes": SAMPLE_WIDTH_BYTES,
+            "channels": CHANNELS,
+            "max_seconds": MAX_SECONDS_PER_UTTERANCE,
+            "default_model": DEFAULT_MODEL,
+            "default_language": DEFAULT_LANG,
+        }
+    )
 
     async def idle_watchdog():
         while True:
             await asyncio.sleep(2)
             if time.time() - stats.last_rx_at > IDLE_TIMEOUT_SEC:
                 try:
-                    await send({"type": "error", "message": f"idle timeout ({IDLE_TIMEOUT_SEC}s). closing."})
+                    await send(
+                        {
+                            "type": "error",
+                            "message": f"idle timeout ({IDLE_TIMEOUT_SEC}s). closing.",
+                        }
+                    )
                 finally:
                     await websocket.close()
                 break
@@ -143,22 +158,28 @@ async def ws_audio(websocket: WebSocket):
                 stats.frames_in += 1
 
                 if len(buf) > MAX_BUF_BYTES:
-                    await send({
-                        "type": "error",
-                        "message": f"buffer exceeded max ({MAX_BUF_BYTES} bytes). clearing buffer.",
-                    })
+                    await send(
+                        {
+                            "type": "error",
+                            "message": f"buffer exceeded max ({MAX_BUF_BYTES} bytes). clearing buffer.",
+                        }
+                    )
                     buf.clear()
                     stats.reset_utterance()
                     continue
 
                 if stats.frames_in % 10 == 0:
-                    await send({
-                        "type": "stats",
-                        "bytes": len(buf),
-                        "seconds": round(len(buf) / (SAMPLE_RATE * SAMPLE_WIDTH_BYTES), 2),
-                        "rms": round(pcm16_rms(bytes(buf[-SAMPLE_RATE * SAMPLE_WIDTH_BYTES:])), 4),
-                        "frames": stats.frames_in,
-                    })
+                    await send(
+                        {
+                            "type": "stats",
+                            "bytes": len(buf),
+                            "seconds": round(len(buf) / (SAMPLE_RATE * SAMPLE_WIDTH_BYTES), 2),
+                            "rms": round(
+                                pcm16_rms(bytes(buf[-SAMPLE_RATE * SAMPLE_WIDTH_BYTES :])), 4
+                            ),
+                            "frames": stats.frames_in,
+                        }
+                    )
 
             elif "text" in msg and msg["text"] is not None:
                 try:
@@ -171,10 +192,20 @@ async def ws_audio(websocket: WebSocket):
                     model = data.get("model", current_cfg["model"])
                     language = data.get("language", current_cfg["language"])
                     if model not in ALLOWED_MODELS:
-                        await send({"type": "error", "message": f"model '{model}' not allowed. Must be one of: {sorted(ALLOWED_MODELS)}"})
+                        await send(
+                            {
+                                "type": "error",
+                                "message": f"model '{model}' not allowed. Must be one of: {sorted(ALLOWED_MODELS)}",
+                            }
+                        )
                         continue
                     if language not in ALLOWED_LANGUAGES:
-                        await send({"type": "error", "message": f"language '{language}' not allowed. Must be one of: {sorted(ALLOWED_LANGUAGES)}"})
+                        await send(
+                            {
+                                "type": "error",
+                                "message": f"language '{language}' not allowed. Must be one of: {sorted(ALLOWED_LANGUAGES)}",
+                            }
+                        )
                         continue
                     current_cfg["model"] = model
                     current_cfg["language"] = language
@@ -184,12 +215,25 @@ async def ws_audio(websocket: WebSocket):
                 if data.get("type") == "stop":
                     audio_seconds = len(buf) / (SAMPLE_RATE * SAMPLE_WIDTH_BYTES)
                     if audio_seconds < 0.2:
-                        await send({"type": "transcript", "text": "", "meta": {"reason": "too_short", "seconds": audio_seconds}})
+                        await send(
+                            {
+                                "type": "transcript",
+                                "text": "",
+                                "meta": {"reason": "too_short", "seconds": audio_seconds},
+                            }
+                        )
                         buf.clear()
                         stats.reset_utterance()
                         continue
 
-                    await send({"type": "state", "value": "processing", "seconds": round(audio_seconds, 2), **current_cfg})
+                    await send(
+                        {
+                            "type": "state",
+                            "value": "processing",
+                            "seconds": round(audio_seconds, 2),
+                            **current_cfg,
+                        }
+                    )
 
                     t0 = time.time()
                     with tempfile.TemporaryDirectory() as td:
@@ -204,15 +248,17 @@ async def ws_audio(websocket: WebSocket):
                                 transcribe, wav_path, current_cfg["model"], current_cfg["language"]
                             )
                             dt = time.time() - t0
-                            await send({
-                                "type": "transcript",
-                                "text": text,
-                                "meta": {
-                                    "latency_sec": round(dt, 2),
-                                    "model": current_cfg["model"],
-                                    "language": current_cfg["language"],
-                                },
-                            })
+                            await send(
+                                {
+                                    "type": "transcript",
+                                    "text": text,
+                                    "meta": {
+                                        "latency_sec": round(dt, 2),
+                                        "model": current_cfg["model"],
+                                        "language": current_cfg["language"],
+                                    },
+                                }
+                            )
                         except Exception as e:
                             log.exception("Transcription error")
                             await send({"type": "error", "message": str(e)})
@@ -230,4 +276,5 @@ async def ws_audio(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("server.app:app", host=HOST, port=PORT, reload=False)
